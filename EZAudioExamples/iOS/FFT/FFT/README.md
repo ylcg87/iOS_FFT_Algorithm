@@ -4,18 +4,23 @@ STFT is achieved by frame-wise FFT from EZAudioFFT library.
 
 ### Step 1: In ViewController.h
 #### replace EZAudioFFTRolling with normal EZAudioFFT in ViewController.h file
+    ```
     //
     // Used to calculate a normal FFT of the incoming audio data.
     //
     @property (nonatomic, strong) EZAudioFFT *fft;
     self.fft = [EZAudioFFT fftWithMaximumBufferSize:FFTViewControllerFFTWindowSize sampleRate:self.microphone.audioStreamBasicDescription.mSampleRate delegate:self];
+    ```
     
 ### Step 2: In ViewController.m
 #### define a new global array for audio data, named as audioData[AUDIODATALENGTH]
+    ```
     #define AUDIODATALENGTH 4096
     float audioData[AUDIODATALENGTH];
+    ```
 
 #### Add constant array storing fundemantal frequency of 88 piano keys
+    ```
     static const float freqBase[88] = {
     // Note A0 - B0
     27.5, 29.135235, 30.867706,
@@ -43,16 +48,20 @@ STFT is achieved by frame-wise FFT from EZAudioFFT library.
     // Note C8
     4186.009044
     };
+    ```
     
 ### Step 3: In ViewController.m, - (void)viewDidLoad
 #### Add zero padding
+    ```
     // Add zero padding if needed
     if (FFTSIZE > AUDIOFRAMELENGTH) {
         for (int i = AUDIOFRAMELENGTH; i < FFTSIZE; i++) {
         audioFrame[i] = 0;
         }
     }
+    ```
 #### Configure microphone parameters by using a new microphone call function, add a configure function before the end of file
+    ```
     self.microphone = [EZMicrophone microphoneWithDelegate:self withAudioStreamBasicDescription:[self customAudioStreamBasicDescriptionWithSampleRate:44100.f]];
     
     // insert the following function before the end of implementation
@@ -79,12 +88,16 @@ STFT is achieved by frame-wise FFT from EZAudioFFT library.
     asbd.mSampleRate       = sampleRate;
     return asbd;
     }
+    ```
 
 #### Update fft configuration function
+    ```
     self.fft = [EZAudioFFT fftWithMaximumBufferSize:fftSize         sampleRate:self.microphone.audioStreamBasicDescription.mSampleRate delegate:self];
+    ```
 
 ### Step 4: In ViewController.m, EZMicrophoneDelegate
 #### Update audioData array in microphone callback function with each buffer received
+    ```
     //
     // Update audioData
     //
@@ -92,12 +105,17 @@ STFT is achieved by frame-wise FFT from EZAudioFFT library.
     audioData[i] = audioData[i+bufferSize];
     for (int i = 0; i < bufferSize; i++)
     audioData[AUDIODATALENGTH-bufferSize+i] = buffer[0][i];
+    ```
     
 #### Change FFT function responding to audioFrame Array and FFTSize
+    ```
     [self.fft computeFFTWithBuffer:audioFrame withBufferSize:FFTSIZE];
+    ```
 
 ### Step 5: In ViewController.m, EZAudioFFTDelegate
 #### add fft maxFrequencyMagnitude
+    ```
     float maxFrequencyMagnitude = [fft maxFrequencyMagnitude];
+    ```
     
 #### IMPORTANT: Add music recognition algorithm then
