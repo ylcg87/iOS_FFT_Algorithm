@@ -27,11 +27,12 @@
 
 #import "ViewController.h"
 
-#define AUDIOFRAMELENGTH 1024
-#define FFTSIZE 2048
+#define AUDIOFRAMELENGTH 4096*2
+#define FFTSIZE 4096*2
 
 static vDSP_Length const fftSize = FFTSIZE;
 float audioFrame[FFTSIZE];
+int debug_int = 0;
 
 static const float freqBase[88] = {
     // Note A0 - B0
@@ -61,6 +62,17 @@ static const float freqBase[88] = {
     4186.009044
 };
 
+static const char *notes[] = {
+    "A0", "A#0", "B0",
+    "C1", "C#1", "D1", "D#1", "E1", "F1", "F#1", "G1", "G#1", "A1", "A#1", "B1",
+    "C2", "C#2", "D2", "D#2", "E2", "F2", "F#2", "G2", "G#2", "A2", "A#2", "B2",
+    "C3", "C#3", "D3", "D#3", "E3", "F3", "F#3", "G3", "G#3", "A3", "A#3", "B3",
+    "C4", "C#4", "D4", "D#4", "E4", "F4", "F#4", "G4", "G#4", "A4", "A#4", "B4",
+    "C5", "C#5", "D5", "D#5", "E5", "F5", "F#5", "G5", "G#5", "A5", "A#5", "B5",
+    "C6", "C#6", "D6", "D#6", "E6", "F6", "F#6", "G6", "G#6", "A6", "A#6", "B6",
+    "C7", "C#7", "D7", "D#7", "E7", "F7", "F#7", "G7", "G#7", "A7", "A#7", "B7",
+    "C8"
+};
 
 @implementation ViewController
 
@@ -162,15 +174,15 @@ static const float freqBase[88] = {
 
     __weak typeof (self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        [weakSelf.audioPlotTime updateBuffer:buffer[0]
-                              withBufferSize:bufferSize];
+        [weakSelf.audioPlotTime updateBuffer:audioFrame
+                              withBufferSize:FFTSIZE];
     });
 }
 
 //------------------------------------------------------------------------------
 #pragma mark - EZAudioFFTDelegate
 //------------------------------------------------------------------------------
-
+#define H 10    // Define total number of harmonics to analyze
 - (void)        fft:(EZAudioFFT *)fft
  updatedWithFFTData:(float *)fftData
          bufferSize:(vDSP_Length)bufferSize
@@ -179,11 +191,121 @@ static const float freqBase[88] = {
     float maxFrequencyMagnitude = [fft maxFrequencyMagnitude];
     NSString *noteName = [EZAudioUtilities noteNameStringForFrequency:maxFrequency
                                                         includeOctave:YES];
+    //
+    // Add multi-F0 match algorithm here
+    //
+    int candidates[2] = {39, 51};           // Define frequency candidates for notes in the chord
+    int candidatesMatched[2] = {false, false};
+    int numCandidate = 2;                   // Define number of F0 candidates
+    float freqMin = 20, freqMax = 15000;    // Define min and max frequency of interest
+    float freqErrorRatio = 0.03;            // Define f0 freq error ratio
+    float magComponentThdRatio = 0.01;      // Define magComponentThdRatio regrading maxFrequencyMagnitude
+    float fc_h_mag[H];                      // Define the buffer to store H harmonics values
+    int fc_h_index[H];                      // Define the buffer to store H harmonics index
+    float fc = 0.0, fc_h = 0.0;
+    int index_h_bottom = 0, index_h_top = 0;
+    float freqBin = self.microphone.audioStreamBasicDescription.mSampleRate/fftSize;
+    int maxIndex = 0;
+    int sharedHarmonicsRatio = 0, interpolateIndex = 0, jump = 0;
+    float magInterpolate = 0.0, sum_fc_h_mag = 0.0;
+    float matchTHD = 1.3;
+    int resultMatch = 0;
+    
+    if (maxFrequencyMagnitude > 1.5) {
+        for (int i = 0; i < numCandidate; i++) {
+            // Determine if F0 of candidate[i] exists from FFT values
+            fc = freqBase[candidates[i]];
+//            printf("i = %d\tfc = %f\n", i, fc);
+            // Initialize fc_h_mag and fc_h_index buffer
+            for (int h = 0; h < H; h++) {
+                fc_h_mag[h] = 0;
+                fc_h_index[h] = 0;
+            }
+            
+            // Find fc_h with the right magnitude and index
+            for (int h = 0; h < H; h++) {
+                fc_h = fc * (h+1);
+//                printf("\th = %d\tfc_h = %f\n", h, fc_h);
+                index_h_bottom = (int) floor(fc_h * (1-freqErrorRatio) / freqBin);
+                index_h_top = (int) ceil(fc_h * (1+freqErrorRatio) / freqBin);
+                // find the max magnitude value and index in range [index_h_bottom, index_h_top]
+                maxIndex = index_h_bottom;
+                for (int j = index_h_bottom+1; j < index_h_top+1; j++) {
+                    if (fftData[j] > fftData[maxIndex]) {
+                        maxIndex = j;
+                    }
+                }
+                fc_h_index[h] = maxIndex;
+                // Check whether fftData[maxIndex] is larger than maxFrequencyMagnitude*magComponentThdRatio
+                if (fftData[maxIndex] >= maxFrequencyMagnitude * magComponentThdRatio) {
+                    fc_h_mag[h] = fftData[maxIndex];
+                } else {
+                    fc_h_mag[h] = 0;
+                }
+            }
+            
+            // Check whether fc_h components have shared harmonics
+            for (int j = i; j < numCandidate; j++) {
+                if ((candidates[j] - candidates[i]) % 12 == 0) {  // Shared harmonics exist, interpolate points
+                    sharedHarmonicsRatio = (int) (candidates[j] - candidates[i]) / 12;
+                    interpolateIndex = sharedHarmonicsRatio;
+                    jump = sharedHarmonicsRatio + 1;
+                    while (interpolateIndex < H-2) {
+                        magInterpolate = 0.5 * (fc_h_mag[interpolateIndex-1] + fc_h_mag[interpolateIndex+1]);
+                        if (magInterpolate < fc_h_mag[interpolateIndex]) {
+                            fc_h_mag[interpolateIndex] = magInterpolate;
+                        }
+                        interpolateIndex = interpolateIndex + jump;
+                    }
+                }
+                break;
+            }
+            
+            //
+            // IMPORTANT: Matching Criterion Implemented Here
+            //
+            // Summation of pc_h_mag
+            sum_fc_h_mag = 0.0;
+            for (int h = 0; h < H; h++) {
+                sum_fc_h_mag = sum_fc_h_mag + fc_h_mag[h];
+            }
+            if (sum_fc_h_mag >= 0.5) { // F0 Found!
+//                printf("F0\t%f Found\n",fc);
+                resultMatch++;
+                // Update fftData component by substracting the current fc_h_mag
+                for (int h = 0; h < H; h++) {
+                    fftData[fc_h_index[h]] = fftData[fc_h_index[h]] - fc_h_mag[h];
+                }
+                // Update maxFrequencyMagnitude
+                maxIndex = 0;
+                for (int k = 0; k < bufferSize; k++) {
+                    if (fftData[k] > fftData[maxIndex]) {
+                        maxIndex = k;
+                    }
+                }
+                maxFrequencyMagnitude = fftData[maxIndex];
+            } else {
+                break;
+            }
+            
+        }
+        
+        // Check whether all F0's have been matched.
+        if (resultMatch == numCandidate) {
+            printf("=====> (%d) Multiple F0 Matched:\n", debug_int);
+            for (int i = 0; i < numCandidate; i++) {
+                printf("=====>\t\t- %s\n", notes[candidates[i]]);
+            }
+            debug_int++;
+        }
+    }
 
+    
+    // Add breakpoint here to debug
     __weak typeof (self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
         weakSelf.maxFrequencyLabel.text = [NSString stringWithFormat:@"Highest Note: %@,\nFrequency: %.2f", noteName, maxFrequency];
-        [weakSelf.audioPlotFreq updateBuffer:fftData withBufferSize:(UInt32)bufferSize];
+        [weakSelf.audioPlotFreq updateBuffer:fftData withBufferSize:(UInt32)bufferSize/8];
     });
 }
 
