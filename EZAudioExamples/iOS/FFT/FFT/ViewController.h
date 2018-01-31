@@ -64,9 +64,9 @@
 @property (nonatomic,strong) EZMicrophone *microphone;
 
 //
-// Used to calculate a normal FFT of the incoming audio data.
+// Used to calculate a rolling FFT of the incoming audio data.
 //
-@property (nonatomic, strong) EZAudioFFT *fft;
+@property (nonatomic, strong) EZAudioFFTRolling *fft;
 
 
 @end

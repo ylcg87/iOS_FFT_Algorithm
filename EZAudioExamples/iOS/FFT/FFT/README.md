@@ -3,12 +3,14 @@ This file explains how to test music recognition algorithm based on short-time F
 STFT is achieved by frame-wise FFT from EZAudioFFT library.
 
 ### Step 1: In ViewController.h
-#### replace EZAudioFFTRolling with normal EZAudioFFT in ViewController.h file
+#### (Disabled) replace EZAudioFFTRolling with normal EZAudioFFT in ViewController.h file
     //
     // Used to calculate a normal FFT of the incoming audio data.
     //
     @property (nonatomic, strong) EZAudioFFT *fft;
     self.fft = [EZAudioFFT fftWithMaximumBufferSize:FFTViewControllerFFTWindowSize sampleRate:self.microphone.audioStreamBasicDescription.mSampleRate delegate:self];
+#### Continue using EZAudioFFTRolling due to the efficiency of circular buffers
+    self.fft = [EZAudioFFT fftWithMaximumBufferSize:fftSize sampleRate:self.microphone.audioStreamBasicDescription.mSampleRate delegate:self];
     
 ### Step 2: In ViewController.m
 #### define a new global array for audio data, named as audioData[AUDIODATALENGTH]

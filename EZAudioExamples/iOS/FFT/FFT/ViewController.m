@@ -25,13 +25,15 @@
 //  THE SOFTWARE.
 //
 
+// This program is for frame-level multi-F0 matching algorithm
+
 #import "ViewController.h"
 
-#define AUDIOFRAMELENGTH 4096*2
-#define FFTSIZE 4096*2
+#define AUDIOFRAMELENGTH 8192
+#define FFTSIZE 8192
+#define H 8    // Define total number of harmonics to analyze
 
 static vDSP_Length const fftSize = FFTSIZE;
-float audioFrame[FFTSIZE];
 int debug_int = 0;
 
 static const float freqBase[88] = {
@@ -109,16 +111,6 @@ static const char *notes[] = {
     {
         NSLog(@"Error setting up audio session active: %@", error.localizedDescription);
     }
-
-    //
-    // Add user startup functions
-    //
-    // Add zero padding if needed
-    if (FFTSIZE > AUDIOFRAMELENGTH) {
-        for (int i = AUDIOFRAMELENGTH; i < FFTSIZE; i++) {
-            audioFrame[i] = 0;
-        }
-    }
     
     //
     // Setup time domain audio plot
@@ -141,7 +133,9 @@ static const char *notes[] = {
     //
     // Create an instance of the EZAudioFFTRolling to keep a history of the incoming audio data and calculate the FFT.
     //
-    self.fft = [EZAudioFFT fftWithMaximumBufferSize:fftSize sampleRate:self.microphone.audioStreamBasicDescription.mSampleRate delegate:self];
+    self.fft = [EZAudioFFTRolling fftWithWindowSize:fftSize
+                                         sampleRate:self.microphone.audioStreamBasicDescription.mSampleRate
+                                           delegate:self];
 
     //
     // Start the mic
@@ -159,30 +153,22 @@ static const char *notes[] = {
        withBufferSize:(UInt32)bufferSize
  withNumberOfChannels:(UInt32)numberOfChannels
 {
-    //
-    // Update audioData
-    //
-    for (int i = 0; i < AUDIOFRAMELENGTH-bufferSize; i++)
-        audioFrame[i] = audioFrame[i+bufferSize];
-    for (int i = 0; i < bufferSize; i++)
-        audioFrame[AUDIOFRAMELENGTH-bufferSize+i] = buffer[0][i];
     
     //
     // Calculate the FFT, will trigger EZAudioFFTDelegate
     //
-    [self.fft computeFFTWithBuffer:audioFrame withBufferSize:FFTSIZE];
+    [self.fft computeFFTWithBuffer:buffer[0] withBufferSize:bufferSize];
 
     __weak typeof (self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        [weakSelf.audioPlotTime updateBuffer:audioFrame
-                              withBufferSize:FFTSIZE];
+        [weakSelf.audioPlotTime updateBuffer:buffer[0]
+                              withBufferSize:bufferSize];
     });
 }
 
 //------------------------------------------------------------------------------
 #pragma mark - EZAudioFFTDelegate
 //------------------------------------------------------------------------------
-#define H 10    // Define total number of harmonics to analyze
 - (void)        fft:(EZAudioFFT *)fft
  updatedWithFFTData:(float *)fftData
          bufferSize:(vDSP_Length)bufferSize
@@ -194,12 +180,69 @@ static const char *notes[] = {
     //
     // Add multi-F0 match algorithm here
     //
+    // Define chord
     int candidates[2] = {39, 51};           // Define frequency candidates for notes in the chord
-    int candidatesMatched[2] = {false, false};
     int numCandidate = 2;                   // Define number of F0 candidates
-    float freqMin = 20, freqMax = 15000;    // Define min and max frequency of interest
-    float freqErrorRatio = 0.03;            // Define f0 freq error ratio
-    float magComponentThdRatio = 0.01;      // Define magComponentThdRatio regrading maxFrequencyMagnitude
+    
+    BOOL isMatched = false;
+    // Run multi-F0 matching algorithm
+    isMatched = [self multiF0MatchwithCandidate:candidates
+                              numberOfCandidate:numCandidate
+                                        fftData:fftData
+                                        fftSize:fftSize
+                          maxFrequencyMagnitude:maxFrequencyMagnitude];
+    
+    // Add breakpoint here to debug
+    __weak typeof (self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        weakSelf.maxFrequencyLabel.text = [NSString stringWithFormat:@"Highest Note: %@,\nFrequency: %.2f", noteName, maxFrequency];
+        [weakSelf.audioPlotFreq updateBuffer:fftData withBufferSize:(UInt32)bufferSize/8];
+    });
+}
+
+/**
+ 音频捕获参数设置
+ 
+ @return return value description
+ */
+- (AudioStreamBasicDescription)customAudioStreamBasicDescriptionWithSampleRate:(CGFloat)sampleRate
+{
+    AudioStreamBasicDescription asbd;
+    UInt32 floatByteSize   = sizeof(float);
+    // 每个通道中的位数，1byte = 8bit
+    asbd.mBitsPerChannel   = 8 * floatByteSize;
+    // 每一帧中的字节数
+    asbd.mBytesPerFrame    = floatByteSize;
+    // 一个数据包中的字节数
+    asbd.mBytesPerPacket   = floatByteSize;
+    // 每一帧数据中的通道数，单声道为1，立体声为2
+    asbd.mChannelsPerFrame = 1;
+    // 每种格式特定的标志，无损编码 ，0表示没有
+    asbd.mFormatFlags      = kAudioFormatFlagIsFloat|kAudioFormatFlagIsNonInterleaved;
+    // 采样数据的类型，PCM,AAC等
+    asbd.mFormatID         = kAudioFormatLinearPCM;
+    // 一个数据包中的帧数，每个packet的帧数。如果是未压缩的音频数据，值是1。动态帧率格式，这个值是一个较大的固定数字，比如说AAC的1024。如果是动态大小帧数（比如Ogg格式）设置为0。
+    asbd.mFramesPerPacket  = 1;
+    // 设置采样率：Hz
+    // 采样率：Hz
+    asbd.mSampleRate       = sampleRate;
+    return asbd;
+}
+
+#pragma mark - Multi-F0 Match Algorithm
+- (BOOL)    multiF0MatchwithCandidate:(int *)candidates
+                    numberOfCandidate:(int)numCandidate
+                              fftData:(float *)fftData
+                              fftSize:(vDSP_Length)fftSize
+                maxFrequencyMagnitude:(float)maxFrequencyMagnitude
+{
+    //
+    // Add multi-F0 match algorithm here
+    //
+    BOOL candidatesMatched[8];  // Define candidateMatched true/false array, 8 as maximum number
+    for (int i = 0; i < 8; i++) {
+        candidatesMatched[i] = false;
+    }
     float fc_h_mag[H];                      // Define the buffer to store H harmonics values
     int fc_h_index[H];                      // Define the buffer to store H harmonics index
     float fc = 0.0, fc_h = 0.0;
@@ -208,14 +251,20 @@ static const char *notes[] = {
     int maxIndex = 0;
     int sharedHarmonicsRatio = 0, interpolateIndex = 0, jump = 0;
     float magInterpolate = 0.0, sum_fc_h_mag = 0.0;
-    float matchTHD = 1.3;
     int resultMatch = 0;
+    BOOL isMatched = false;
     
-    if (maxFrequencyMagnitude > 1.5) {
+    // Define thresholds
+    float startEnergyMatchTHD = 1.5;        // Define the maxFrequencyMagnitude threshold to start matching
+    float freqErrorRatio = 0.03;            // Define f0 freq error ratio to be 6% total
+    float magComponentThdRatio = 0.01;      // Define maxFrequencyMagnitude neglecting threshold to be 1%
+    float sum_fc_h_mag_THD = 0.5;           // Define summation matching threshold for each candidate
+    
+    if (maxFrequencyMagnitude > startEnergyMatchTHD) {  // Change threshold to satisfy different devices
         for (int i = 0; i < numCandidate; i++) {
             // Determine if F0 of candidate[i] exists from FFT values
             fc = freqBase[candidates[i]];
-//            printf("i = %d\tfc = %f\n", i, fc);
+            //            printf("i = %d\tfc = %f\n", i, fc);
             // Initialize fc_h_mag and fc_h_index buffer
             for (int h = 0; h < H; h++) {
                 fc_h_mag[h] = 0;
@@ -225,7 +274,7 @@ static const char *notes[] = {
             // Find fc_h with the right magnitude and index
             for (int h = 0; h < H; h++) {
                 fc_h = fc * (h+1);
-//                printf("\th = %d\tfc_h = %f\n", h, fc_h);
+                //                printf("\th = %d\tfc_h = %f\n", h, fc_h);
                 index_h_bottom = (int) floor(fc_h * (1-freqErrorRatio) / freqBin);
                 index_h_top = (int) ceil(fc_h * (1+freqErrorRatio) / freqBin);
                 // find the max magnitude value and index in range [index_h_bottom, index_h_top]
@@ -269,8 +318,8 @@ static const char *notes[] = {
             for (int h = 0; h < H; h++) {
                 sum_fc_h_mag = sum_fc_h_mag + fc_h_mag[h];
             }
-            if (sum_fc_h_mag >= 0.5) { // F0 Found!
-//                printf("F0\t%f Found\n",fc);
+            if (sum_fc_h_mag >= sum_fc_h_mag_THD) { // F0 Found! Change threshold 0.5 to satisfy different devices
+                //                printf("F0\t%f Found\n",fc);
                 resultMatch++;
                 // Update fftData component by substracting the current fc_h_mag
                 for (int h = 0; h < H; h++) {
@@ -278,7 +327,7 @@ static const char *notes[] = {
                 }
                 // Update maxFrequencyMagnitude
                 maxIndex = 0;
-                for (int k = 0; k < bufferSize; k++) {
+                for (int k = 0; k < fftSize/2; k++) {
                     if (fftData[k] > fftData[maxIndex]) {
                         maxIndex = k;
                     }
@@ -292,6 +341,7 @@ static const char *notes[] = {
         
         // Check whether all F0's have been matched.
         if (resultMatch == numCandidate) {
+            isMatched = true;
             printf("=====> (%d) Multiple F0 Matched:\n", debug_int);
             for (int i = 0; i < numCandidate; i++) {
                 printf("=====>\t\t- %s\n", notes[candidates[i]]);
@@ -299,43 +349,8 @@ static const char *notes[] = {
             debug_int++;
         }
     }
-
     
-    // Add breakpoint here to debug
-    __weak typeof (self) weakSelf = self;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        weakSelf.maxFrequencyLabel.text = [NSString stringWithFormat:@"Highest Note: %@,\nFrequency: %.2f", noteName, maxFrequency];
-        [weakSelf.audioPlotFreq updateBuffer:fftData withBufferSize:(UInt32)bufferSize/8];
-    });
-}
-
-/**
- 音频捕获参数设置
- 
- @return return value description
- */
-- (AudioStreamBasicDescription)customAudioStreamBasicDescriptionWithSampleRate:(CGFloat)sampleRate
-{
-    AudioStreamBasicDescription asbd;
-    UInt32 floatByteSize   = sizeof(float);
-    // 每个通道中的位数，1byte = 8bit
-    asbd.mBitsPerChannel   = 8 * floatByteSize;
-    // 每一帧中的字节数
-    asbd.mBytesPerFrame    = floatByteSize;
-    // 一个数据包中的字节数
-    asbd.mBytesPerPacket   = floatByteSize;
-    // 每一帧数据中的通道数，单声道为1，立体声为2
-    asbd.mChannelsPerFrame = 1;
-    // 每种格式特定的标志，无损编码 ，0表示没有
-    asbd.mFormatFlags      = kAudioFormatFlagIsFloat|kAudioFormatFlagIsNonInterleaved;
-    // 采样数据的类型，PCM,AAC等
-    asbd.mFormatID         = kAudioFormatLinearPCM;
-    // 一个数据包中的帧数，每个packet的帧数。如果是未压缩的音频数据，值是1。动态帧率格式，这个值是一个较大的固定数字，比如说AAC的1024。如果是动态大小帧数（比如Ogg格式）设置为0。
-    asbd.mFramesPerPacket  = 1;
-    // 设置采样率：Hz
-    // 采样率：Hz
-    asbd.mSampleRate       = sampleRate;
-    return asbd;
+    return isMatched;
 }
 
 @end
